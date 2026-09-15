@@ -26,5 +26,5 @@ jobs:
       - name: 执行策略监控脚本
         env:
           # 读取你在 Secrets 中配置的微信 Token
-          WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
+          WECHAT_TOKEN: ${{ secrets.BARK_KEY }}
         run: python fx_monitor.py
