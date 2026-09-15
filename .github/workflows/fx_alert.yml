@@ -1,0 +1,30 @@
+name: FX Signal Hourly Check
+
+on:
+  schedule:
+    # 周一至周五，每小时整点运行一次 (基于 UTC，涵盖日本全天交易时段)
+    - cron: '0 * * * 1-5'
+  workflow_dispatch: # 允许手动点击触发测试
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 Python 依赖库
+        # 这里包含了必须的 requests 库
+        run: |
+          pip install yfinance pandas numpy requests
+
+      - name: 执行策略监控脚本
+        env:
+          # 读取你在 Secrets 中配置的微信 Token
+          WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
+        run: python fx_monitor.py
