@@ -23,7 +23,7 @@ def send_bark_alert(subject: str, content: str):
         "title": subject,
         "body": content,
         "group": "FX-Alert",
-        "sound": "minuet.caf"
+        "sound": "telegraph.caf"
     }
     try:
         response = requests.post(url, json=payload)
