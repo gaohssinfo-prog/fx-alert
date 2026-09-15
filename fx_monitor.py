@@ -11,25 +11,26 @@ PAIRS = {
     "GBP/JPY": "GBPJPY=X",
 }
 
-# 微信推送函数
-def send_wechat_alert(subject: str, content: str):
-    token = os.getenv("WECHAT_TOKEN")
-    if not token:
-        print("未配置微信 Token，仅控制台输出：\n", content)
+# ⭐️ 替换为 Bark 苹果推送函数 (无需实名认证)
+def send_bark_alert(subject: str, content: str):
+    bark_key = os.getenv("BARK_KEY")
+    if not bark_key:
+        print("未配置 BARK_KEY，仅控制台输出：\n", content)
         return
     
-    url = "http://www.pushplus.plus/send"
+    # Bark 的官方请求地址
+    url = f"https://api.day.app/{bark_key}/"
     payload = {
-        "token": token,
         "title": subject,
-        "content": content,
-        "template": "txt"
+        "body": content,
+        "group": "FX-Alert",
+        "sound": "minuet.caf" # 设置一个特别的提示音
     }
     try:
         response = requests.post(url, json=payload)
-        print("微信推送成功:", response.text)
+        print("Bark推送结果:", response.text)
     except Exception as e:
-        print("微信推送失败:", e)
+        print("Bark推送失败:", e)
 
 # 计算 RSI
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -93,28 +94,25 @@ def analyze_pair(name: str, symbol: str):
     if long_signal:
         sl = round(h_low.iloc[-10:].min() - 0.15, 3)
         tp = round(curr_price + ((curr_price - sl) * 1.3), 3)
-        subject = f"🟢【买入信号】{name} 满足条件"
-        body = (f"【日线】多头 (RSI: {last_d_rsi:.1f}, MACD柱 > 0)\n"
-                f"【H1】超卖反弹且金叉 (RSI: {c_rsi:.1f})\n\n"
-                f"当前价格: {curr_price:.3f}\n建议止损: {sl}\n建议止盈: {tp}\n\n"
-                f"操作纪律：挂OCO单，浮盈1:1即推保本。")
-        send_wechat_alert(subject, body)
+        subject = f"🟢买入信号：{name}"
+        body = (f"【日线】多头共振\n"
+                f"【H1】超卖且金叉\n\n"
+                f"当前价: {curr_price:.3f}\n建议止损: {sl}\n建议止盈: {tp}")
+        send_bark_alert(subject, body)
 
     elif short_signal:
         sl = round(h_high.iloc[-10:].max() + 0.15, 3)
         tp = round(curr_price - ((sl - curr_price) * 1.3), 3)
-        subject = f"🔴【卖出信号】{name} 满足条件"
-        body = (f"【日线】空头 (RSI: {last_d_rsi:.1f}, MACD柱 < 0)\n"
-                f"【H1】超买回落且死叉 (RSI: {c_rsi:.1f})\n\n"
-                f"当前价格: {curr_price:.3f}\n建议止损: {sl}\n建议止盈: {tp}\n\n"
-                f"操作纪律：挂OCO单，浮盈1:1即推保本。")
-        send_wechat_alert(subject, body)
+        subject = f"🔴卖出信号：{name}"
+        body = (f"【日线】空头共振\n"
+                f"【H1】超买且死叉\n\n"
+                f"当前价: {curr_price:.3f}\n建议止损: {sl}\n建议止盈: {tp}")
+        send_bark_alert(subject, body)
 
 if __name__ == "__main__":
-    # 手动测试时如果非交易时间触发，可能会因为条件不满足而不发推送，这属于正常现象。
-    # 为了验证推送通路，如果环境变量存在，先发一条启动测试通知（正式使用时可注释掉下面两行）
-    if os.getenv("WECHAT_TOKEN"):
-        send_wechat_alert("⚙️ 外汇监控系统", "系统连通性测试成功，开始按规则进行监控。")
+    # 发送启动测试通知，验证 Bark 是否畅通
+    if os.getenv("BARK_KEY"):
+        send_bark_alert("⚙️ 外汇监控系统", "完美跳过实名认证，Bark 推送通道测试成功！")
         
     for pair_name, ticker in PAIRS.items():
         try:
