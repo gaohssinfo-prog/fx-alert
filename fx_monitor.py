@@ -6,11 +6,10 @@ import pandas as pd
 import yfinance as yf
 
 # ================= 配置区域 =================
-# 监控的货币对字典
+# 纯正的日元交叉盘监控矩阵：统一精度，极简高效
 PAIRS = {
-    "USD/JPY": "USDJPY=X",
-    "AUD/JPY": "AUDJPY=X",
-    "GBP/JPY": "GBPJPY=X",
+    "USD/JPY": "USDJPY=X",  # 美日：宏观风向标，趋势极强
+    "EUR/JPY": "EURJPY=X",  # 欧日：交叉盘趋势之王，极其丝滑
 }
 
 # 常见外汇基本面新闻：英文转中文词典 (确保云端运行极度稳定，无惧 API 限制)
@@ -122,6 +121,36 @@ def get_macro_events(pair_name: str) -> str:
     except Exception as e:
         return f"⚠️ 财经日历拉取异常: {e}"
 
+def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
+    """
+    整数关卡避让算法：在遇到 .00 或 .50 这种强心理阻力位时提前抢跑
+    """
+    is_jpy = "JPY" in symbol
+    
+    # 设定关键心理关口的步长 (日元每 0.50 圆一个关口，欧美每 0.0050 一个关口)
+    round_base = 0.5 if is_jpy else 0.005 
+    
+    # 设定引力区 (距离关口 10 pips 以内，就触发避让)
+    zone = 0.10 if is_jpy else 0.0010 
+    
+    # 设定让利/抢跑空间 (在墙的前面提前 5 pips 平仓落袋)
+    buffer = 0.05 if is_jpy else 0.0005 
+    
+    # 找到距离当前预测 TP 最近的心理整数关口
+    nearest_round = round(tp / round_base) * round_base
+    
+    # 如果原始 TP 刚好落在了整数关口的引力区内，启动抢跑机制
+    if abs(tp - nearest_round) <= zone:
+        if is_long:
+            # 做多向上冲，要在碰到天花板前提前卖出
+            return nearest_round - buffer
+        else:
+            # 做空向下砸，要在砸到地板前提前买平
+            return nearest_round + buffer
+            
+    # 如果不在危险区，原样返回原始 TP
+    return tp
+
 # ================= 核心指标算法 =================
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """计算 RSI 相对强弱指标"""
@@ -158,7 +187,11 @@ def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
 def analyze_pair(name: str, symbol: str):
     """执行单个货币对的策略分析核心引擎"""
     # 根据是否包含 JPY 决定 pip 乘数 (日元盘 1 pip = 0.01，非日元盘 = 0.0001)
-    pip_mult = 100 if "JPY" in symbol else 10000
+    is_jpy = "JPY" in symbol
+    pip_mult = 100 if is_jpy else 10000
+    # 动态精度：保留该自适应代码，即使目前只有日元盘，方便未来横向扩展
+    round_dec = 3 if is_jpy else 5  
+    price_fmt = "{:.3f}" if is_jpy else "{:.5f}"
 
     # 1. 获取日线数据（判定大趋势，过滤震荡行情）
     d_data = yf.download(symbol, period="60d", interval="1d", progress=False, auto_adjust=True)
@@ -187,8 +220,8 @@ def analyze_pair(name: str, symbol: str):
     c_rsi, prev_rsi = h_rsi.iloc[-1], h_rsi.iloc[-2]
     c_macd, prev_macd = h_macd.iloc[-1], h_macd.iloc[-2]
     c_sig, prev_sig = h_sig.iloc[-1], h_sig.iloc[-2]
-    curr_price = h_close.iloc[-1]
-    curr_atr = h_atr.iloc[-1]
+    curr_price = float(h_close.iloc[-1])
+    curr_atr = float(h_atr.iloc[-1])
 
     # H1 级别金叉死叉判定
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
@@ -206,16 +239,22 @@ def analyze_pair(name: str, symbol: str):
         risk_pips = risk_dist * pip_mult
         
         if long_signal:
-            sl = round(curr_price - risk_dist, 3)
-            # 订单A锁定1.5R收益，保本锁胜率
-            tp_a = round(curr_price + (risk_dist * 1.5), 3)
+            sl = round(curr_price - risk_dist, round_dec)
+            
+            # 计算原始 TP，并过一遍整数避让算法优化
+            raw_tp_a = curr_price + (risk_dist * 1.5)
+            tp_a = round(optimize_tp(raw_tp_a, True, symbol), round_dec) # 订单A锁定1.5R收益，保本锁胜率
+            
             subject = f"🟢【买入信号】{name}"
             trend_text = "多头共振"
             h1_text = "超卖且金叉"
         else:
-            sl = round(curr_price + risk_dist, 3)
-            # 订单A锁定1.5R收益，保本锁胜率
-            tp_a = round(curr_price - (risk_dist * 1.5), 3)
+            sl = round(curr_price + risk_dist, round_dec)
+            
+            # 计算原始 TP，并过一遍整数避让算法优化
+            raw_tp_a = curr_price - (risk_dist * 1.5)
+            tp_a = round(optimize_tp(raw_tp_a, False, symbol), round_dec) # 订单A锁定1.5R收益，保本锁胜率
+            
             subject = f"🔴【卖出信号】{name}"
             trend_text = "空头共振"
             h1_text = "超买且死叉"
@@ -223,15 +262,20 @@ def analyze_pair(name: str, symbol: str):
         # 触发信号时，实时抓取该货币对的基本面日历，准备推送
         macro_info = get_macro_events(name)
 
+        # 动态格式化数字显示（保证推送界面的小数位数整齐）
+        curr_price_str = price_fmt.format(curr_price)
+        sl_str = price_fmt.format(sl)
+        tp_a_str = price_fmt.format(tp_a)
+
         # 组合 Bark 推送文本，展示双仓操作建议与宏观风险提示
         body = (f"【日线】{trend_text}\n"
                 f"【H1】{h1_text}\n\n"
-                f"🔹 当前入场价：{curr_price:.3f}\n"
+                f"🔹 当前入场价：{curr_price_str}\n"
                 f"🔹 当前 ATR：{curr_atr * pip_mult:.1f} pips\n\n"
                 f"🎯 操作建议 (双开分仓)：\n"
-                f"1. 【订单 A】限价止盈：{tp_a:.3f}\n"
+                f"1. 【订单 A】限价止盈：{tp_a_str}\n"
                 f"2. 【订单 B】追踪步长：{risk_pips:.1f} pips\n"
-                f"*(硬止损均设为 {sl:.3f})*\n\n"
+                f"*(硬止损均设为 {sl_str})*\n\n"
                 f"📅 风险提示 (重大数据/日本时间)：\n{macro_info}")
         
         send_bark_alert(subject, body)
