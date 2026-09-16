@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 # ================= 配置区域 =================
-# 监控的货币对
+# 监控的货币对字典
 PAIRS = {
     "USD/JPY": "USDJPY=X",
     "AUD/JPY": "AUDJPY=X",
@@ -49,7 +49,7 @@ def translate_event(title: str) -> str:
     return title
 
 def send_bark_alert(subject: str, content: str):
-    """发送 Bark 苹果推送通知"""
+    """发送 Bark 苹果推送通知给 iPhone"""
     bark_key = os.getenv("BARK_KEY")
     if not bark_key:
         print("未配置 BARK_KEY，仅控制台输出：\n", content)
@@ -69,7 +69,7 @@ def send_bark_alert(subject: str, content: str):
         print("Bark推送失败:", e)
 
 def get_macro_events(pair_name: str) -> str:
-    """获取目标货币对近期的红色(High)重大经济指标，并翻译为中文"""
+    """获取目标货币对近期的红色(High)重大经济指标，并转换为日本时间(JST)"""
     currencies = pair_name.split('/')
     try:
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
@@ -78,29 +78,45 @@ def get_macro_events(pair_name: str) -> str:
         root = ET.fromstring(res.content)
         
         alerts = []
-        # 使用 pandas 获取当前 UTC 时间，过滤掉过去的数据
-        today = pd.Timestamp.utcnow().normalize()
+        # 获取当前 UTC 精确时间，用于过滤已经过去的历史数据
+        now_utc = pd.Timestamp.utcnow()
         
         for event in root.findall('event'):
             impact = event.find('impact').text
             country = event.find('country').text
             
-            # 筛选：仅限我们要交易的货币，且影响级别为 High（红色核弹级）
+            # 筛选：仅限我们要交易的货币，且影响级别为 High (红色核弹级)
             if impact == 'High' and country in currencies:
                 date_str = event.find('date').text
-                event_date = pd.to_datetime(date_str).tz_localize('UTC')
+                time_str = event.find('time').text
                 
-                # 只保留今天及以后的数据
-                if event_date >= today:
-                    time_str = event.find('time').text
+                try:
+                    # 处理如 "All Day" 等特殊无具体时间的情况
+                    if time_str.lower() in ["all day", "tentative"]:
+                        event_dt_utc = pd.to_datetime(date_str).tz_localize('UTC')
+                        display_time = f"{date_str} {time_str}"
+                    else:
+                        # 组合日期与时间并解析为 UTC
+                        event_dt_utc = pd.to_datetime(f"{date_str} {time_str}").tz_localize('UTC')
+                        # 转换为日本时间 JST (Asia/Tokyo)
+                        event_dt_jst = event_dt_utc.tz_convert('Asia/Tokyo')
+                        # 格式化输出，例如：09-17 03:00
+                        display_time = event_dt_jst.strftime('%m-%d %H:%M')
+                except Exception:
+                    # 遇到无法解析的异常格式时提供容错兜底
+                    event_dt_utc = pd.to_datetime(date_str).tz_localize('UTC')
+                    display_time = f"{date_str} {time_str}"
+                
+                # 过滤条件：仅保留未来将要发布，以及过去 2 小时内刚刚发布的重大数据
+                if event_dt_utc >= now_utc - pd.Timedelta(hours=2):
                     title_eng = event.find('title').text
-                    title_cn = translate_event(title_eng) # 调用翻译函数
-                    alerts.append(f"⚠️ [{country}] {date_str} {time_str} | {title_cn}")
+                    title_cn = translate_event(title_eng) # 调用字典翻译
+                    alerts.append(f"⚠️ [{country}] {display_time} | {title_cn}")
         
         if not alerts:
             return "✅ 近期无重大(High)经济数据公布"
         
-        # 为了不让通知太长，最多只显示未来 3 条核心数据
+        # 为了防止弹窗内容过长，最多只显示最临近的 3 条核心数据
         return "\n".join(alerts[:3])
         
     except Exception as e:
@@ -118,7 +134,7 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    """计算 MACD 指标 (国际标准参数 12, 26, 9)"""
+    """计算 MACD 指标 (坚持华尔街国际标准参数: 12, 26, 9)"""
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -127,7 +143,7 @@ def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int 
     return macd_line, signal_line, hist
 
 def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
-    """计算 ATR 真实波动幅度，用于动态止损"""
+    """计算 ATR 真实波动幅度，用于设定动态的止损和追踪步长"""
     high = data['High']
     low = data['Low']
     close = data['Close']
@@ -140,11 +156,11 @@ def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
 
 # ================= 策略主逻辑 =================
 def analyze_pair(name: str, symbol: str):
-    """执行单个货币对的策略分析"""
-    # 根据是否包含 JPY 决定 pip 乘数 (日元盘 1 pip = 0.01)
+    """执行单个货币对的策略分析核心引擎"""
+    # 根据是否包含 JPY 决定 pip 乘数 (日元盘 1 pip = 0.01，非日元盘 = 0.0001)
     pip_mult = 100 if "JPY" in symbol else 10000
 
-    # 1. 获取日线数据（判定大趋势）
+    # 1. 获取日线数据（判定大趋势，过滤震荡行情）
     d_data = yf.download(symbol, period="60d", interval="1d", progress=False, auto_adjust=True)
     if len(d_data) < 35: return
     d_close = d_data["Close"].squeeze() if isinstance(d_data["Close"], pd.DataFrame) else d_data["Close"]
@@ -154,12 +170,12 @@ def analyze_pair(name: str, symbol: str):
     last_d_rsi = d_rsi.iloc[-1]
     last_d_hist = d_hist.iloc[-1]
 
-    # 日线趋势过滤 (顺势而为)
+    # 日线趋势过滤器：大方向不明确时绝对不进场
     bullish_regime = (last_d_hist > 0) and (last_d_rsi > 50)
     bearish_regime = (last_d_hist < 0) and (last_d_rsi < 50)
     if not (bullish_regime or bearish_regime): return
 
-    # 2. 获取 1小时数据（寻找入场拐点与 ATR）
+    # 2. 获取 1小时数据（寻找精准的入场拐点与计算 ATR 波动率）
     h_data = yf.download(symbol, period="10d", interval="1h", progress=False, auto_adjust=True)
     if len(h_data) < 35: return
     
@@ -174,35 +190,40 @@ def analyze_pair(name: str, symbol: str):
     curr_price = h_close.iloc[-1]
     curr_atr = h_atr.iloc[-1]
 
-    # 金叉死叉判定
+    # H1 级别金叉死叉判定
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
-    # 信号触发条件 (RSI 极限反转 + MACD 顺势交叉)
+    # 3. 信号触发严格条件 (RSI 极限反转 + MACD 顺势交叉)
+    # 做多：日线多头 + H1金叉 + 过去5小时内RSI曾跌破35洗盘 + 当前RSI收回35以上
     long_signal = bullish_regime and golden_cross and (min(h_rsi.iloc[-5:]) < 35) and (c_rsi >= 35)
+    # 做空：日线空头 + H1死叉 + 过去5小时内RSI曾突破65诱多 + 当前RSI跌破65以下
     short_signal = bearish_regime and death_cross and (max(h_rsi.iloc[-5:]) > 65) and (c_rsi <= 65)
 
     if long_signal or short_signal:
-        # 新风控逻辑：动态计算 1.5 倍 ATR 止损
+        # 4. 双子星分仓战法风控逻辑：动态计算 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
         risk_pips = risk_dist * pip_mult
         
         if long_signal:
             sl = round(curr_price - risk_dist, 3)
+            # 订单A锁定1.5R收益，保本锁胜率
             tp_a = round(curr_price + (risk_dist * 1.5), 3)
             subject = f"🟢【买入信号】{name}"
             trend_text = "多头共振"
             h1_text = "超卖且金叉"
         else:
             sl = round(curr_price + risk_dist, 3)
+            # 订单A锁定1.5R收益，保本锁胜率
             tp_a = round(curr_price - (risk_dist * 1.5), 3)
             subject = f"🔴【卖出信号】{name}"
             trend_text = "空头共振"
             h1_text = "超买且死叉"
 
-        # 触发信号时，实时抓取该货币对的基本面日历
+        # 触发信号时，实时抓取该货币对的基本面日历，准备推送
         macro_info = get_macro_events(name)
 
+        # 组合 Bark 推送文本，展示双仓操作建议与宏观风险提示
         body = (f"【日线】{trend_text}\n"
                 f"【H1】{h1_text}\n\n"
                 f"🔹 当前入场价：{curr_price:.3f}\n"
@@ -211,7 +232,7 @@ def analyze_pair(name: str, symbol: str):
                 f"1. 【订单 A】限价止盈：{tp_a:.3f}\n"
                 f"2. 【订单 B】追踪步长：{risk_pips:.1f} pips\n"
                 f"*(硬止损均设为 {sl:.3f})*\n\n"
-                f"📅 风险提示 (重大数据/美东时间)：\n{macro_info}")
+                f"📅 风险提示 (重大数据/日本时间)：\n{macro_info}")
         
         send_bark_alert(subject, body)
 
