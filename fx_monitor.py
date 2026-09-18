@@ -195,8 +195,10 @@ def analyze_pair(name: str, symbol: str):
     round_dec = 3 if is_jpy else 5  
     price_fmt = "{:.3f}" if is_jpy else "{:.5f}"
 
-    # 1. 一次性获取较长时间的 1 小时数据（解决 yfinance 无法直接拉取 4H 的问题）
-    h_data_all = yf.download(symbol, period="30d", interval="1h", progress=False, auto_adjust=True)
+    # 1. 【核心修复】改用 yf.Ticker().history() 绕过 yfinance 新版多层索引报错
+    tkr = yf.Ticker(symbol)
+    h_data_all = tkr.history(period="30d", interval="1h")
+    
     if len(h_data_all) < 100: return
 
     # 2. 利用 pandas 重采样合成 4 小时 (H4) K线，判定大趋势
