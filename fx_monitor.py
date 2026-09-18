@@ -19,6 +19,8 @@ TRANSLATE_DICT = {
     "Press Conference": "新闻发布会",
     "Economic Projections": "经济预测",
     "Federal Funds Rate": "联邦基金利率",
+    "BOJ Policy Rate": "日本央行利率决议",
+    "BOJ": "日本央行",
     "Non-Farm Employment Change": "非农就业人数",
     "Unemployment Rate": "失业率",
     "Core CPI m/m": "核心CPI月率",
@@ -189,37 +191,43 @@ def analyze_pair(name: str, symbol: str):
     # 根据是否包含 JPY 决定 pip 乘数 (日元盘 1 pip = 0.01，非日元盘 = 0.0001)
     is_jpy = "JPY" in symbol
     pip_mult = 100 if is_jpy else 10000
-    # 动态精度：保留该自适应代码，即使目前只有日元盘，方便未来横向扩展
+    # 动态精度：保留该自适应代码，方便未来横向扩展
     round_dec = 3 if is_jpy else 5  
     price_fmt = "{:.3f}" if is_jpy else "{:.5f}"
 
-    # 1. 获取日线数据（判定大趋势，过滤震荡行情）
-    d_data = yf.download(symbol, period="60d", interval="1d", progress=False, auto_adjust=True)
-    if len(d_data) < 35: return
-    d_close = d_data["Close"].squeeze() if isinstance(d_data["Close"], pd.DataFrame) else d_data["Close"]
-    
-    d_rsi = compute_rsi(d_close)
-    _, _, d_hist = compute_macd(d_close)
-    last_d_rsi = d_rsi.iloc[-1]
-    last_d_hist = d_hist.iloc[-1]
+    # 1. 一次性获取较长时间的 1 小时数据（解决 yfinance 无法直接拉取 4H 的问题）
+    h_data_all = yf.download(symbol, period="30d", interval="1h", progress=False, auto_adjust=True)
+    if len(h_data_all) < 100: return
 
-    # 日线趋势过滤器：大方向不明确时绝对不进场
-    bullish_regime = (last_d_hist > 0) and (last_d_rsi > 50)
-    bearish_regime = (last_d_hist < 0) and (last_d_rsi < 50)
+    # 2. 利用 pandas 重采样合成 4 小时 (H4) K线，判定大趋势
+    h4_data = h_data_all.resample('4h', closed='right', label='right').agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last'
+    }).dropna()
+    
+    h4_close = h4_data["Close"].squeeze() if isinstance(h4_data["Close"], pd.DataFrame) else h4_data["Close"]
+    h4_rsi = compute_rsi(h4_close)
+    _, _, h4_hist = compute_macd(h4_close)
+    
+    last_h4_rsi = float(h4_rsi.iloc[-1])
+    last_h4_hist = float(h4_hist.iloc[-1])
+
+    # H4 趋势过滤器：大方向不明确时绝对不进场，反应比日线更灵敏
+    bullish_regime = (last_h4_hist > 0) and (last_h4_rsi > 50)
+    bearish_regime = (last_h4_hist < 0) and (last_h4_rsi < 50)
     if not (bullish_regime or bearish_regime): return
 
-    # 2. 获取 1小时数据（寻找精准的入场拐点与计算 ATR 波动率）
-    h_data = yf.download(symbol, period="10d", interval="1h", progress=False, auto_adjust=True)
-    if len(h_data) < 35: return
-    
-    h_close = h_data["Close"].squeeze() if isinstance(h_data["Close"], pd.DataFrame) else h_data["Close"]
+    # 3. 使用原生 1 小时 (H1) 数据寻找精准的入场拐点与计算 ATR 波动率
+    h_close = h_data_all["Close"].squeeze() if isinstance(h_data_all["Close"], pd.DataFrame) else h_data_all["Close"]
     h_rsi = compute_rsi(h_close)
     h_macd, h_sig, _ = compute_macd(h_close)
-    h_atr = compute_atr(h_data)
+    h_atr = compute_atr(h_data_all)
 
-    c_rsi, prev_rsi = h_rsi.iloc[-1], h_rsi.iloc[-2]
-    c_macd, prev_macd = h_macd.iloc[-1], h_macd.iloc[-2]
-    c_sig, prev_sig = h_sig.iloc[-1], h_sig.iloc[-2]
+    c_rsi, prev_rsi = float(h_rsi.iloc[-1]), float(h_rsi.iloc[-2])
+    c_macd, prev_macd = float(h_macd.iloc[-1]), float(h_macd.iloc[-2])
+    c_sig, prev_sig = float(h_sig.iloc[-1]), float(h_sig.iloc[-2])
     curr_price = float(h_close.iloc[-1])
     curr_atr = float(h_atr.iloc[-1])
 
@@ -227,14 +235,14 @@ def analyze_pair(name: str, symbol: str):
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
-    # 3. 信号触发严格条件 (RSI 极限反转 + MACD 顺势交叉)
-    # 做多：日线多头 + H1金叉 + 过去5小时内RSI曾跌破35洗盘 + 当前RSI收回35以上
-    long_signal = bullish_regime and golden_cross and (min(h_rsi.iloc[-5:]) < 35) and (c_rsi >= 35)
-    # 做空：日线空头 + H1死叉 + 过去5小时内RSI曾突破65诱多 + 当前RSI跌破65以下
-    short_signal = bearish_regime and death_cross and (max(h_rsi.iloc[-5:]) > 65) and (c_rsi <= 65)
+    # 4. 信号触发严格条件 (RSI 极限反转 + MACD 顺势交叉)
+    # 做多：H4多头 + H1金叉 + 过去5小时内RSI曾跌破35洗盘 + 当前RSI收回35以上
+    long_signal = bullish_regime and golden_cross and (float(h_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
+    # 做空：H4空头 + H1死叉 + 过去5小时内RSI曾突破65诱多 + 当前RSI跌破65以下
+    short_signal = bearish_regime and death_cross and (float(h_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
 
     if long_signal or short_signal:
-        # 4. 双子星分仓战法风控逻辑：动态计算 1.5 倍 ATR 止损
+        # 5. 双子星分仓战法风控逻辑：动态计算 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
         risk_pips = risk_dist * pip_mult
         
@@ -267,8 +275,8 @@ def analyze_pair(name: str, symbol: str):
         sl_str = price_fmt.format(sl)
         tp_a_str = price_fmt.format(tp_a)
 
-        # 组合 Bark 推送文本，展示双仓操作建议与宏观风险提示
-        body = (f"【日线】{trend_text}\n"
+        # 组合 Bark 推送文本，展示双仓操作建议与宏观风险提示 (注意更新为 H4)
+        body = (f"【H4】{trend_text}\n"
                 f"【H1】{h1_text}\n\n"
                 f"🔹 当前入场价：{curr_price_str}\n"
                 f"🔹 当前 ATR：{curr_atr * pip_mult:.1f} pips\n\n"
