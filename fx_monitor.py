@@ -242,7 +242,11 @@ def analyze_pair(name: str, symbol: str):
     long_signal = bullish_regime and golden_cross and (float(h_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
     # 做空：H4空头 + H1死叉 + 过去5小时内RSI曾突破65诱多 + 当前RSI跌破65以下
     short_signal = bearish_regime and death_cross and (float(h_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
-
+    # === [新增] 系统状态心跳诊断日志 ===
+    print(f"📊 【{name} 状态诊断】")
+    print(f"H4大趋势 -> RSI: {last_h4_rsi:.1f} | MACD柱: {last_h4_hist:.4f} | 看多: {bullish_regime} | 看空: {bearish_regime}")
+    print(f"H1信号区 -> RSI: {c_rsi:.1f} (近5小时极值: {float(h_rsi.iloc[-5:].min()):.1f} - {float(h_rsi.iloc[-5:].max()):.1f}) | 金叉: {golden_cross} | 死叉: {death_cross}\n")
+    # ==================================
     if long_signal or short_signal:
         # 5. 双子星分仓战法风控逻辑：动态计算 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
