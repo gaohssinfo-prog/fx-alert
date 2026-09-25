@@ -1,9 +1,10 @@
-name: FX Signal Hourly Check
+name: FX Signal Hourly Check (H4+H1)
 
 on:
   schedule:
-    # 周一至周五，每小时整点运行一次 (基于 UTC，涵盖日本全天交易时段)
-    - cron: '0 * * * 1-5'
+    # 核心优化：避开整点未收盘陷阱，延后 1 分钟在每小时的 01 分执行 (基于 UTC，周一至周五)
+    - cron: '1 * * * 1-5'
+  
   workflow_dispatch: # 允许手动点击触发测试
 
 jobs:
@@ -19,12 +20,12 @@ jobs:
           python-version: '3.11'
 
       - name: 安装 Python 依赖库
-        # 这里包含了必须的 requests 库
         run: |
+          python -m pip install --upgrade pip
           pip install yfinance pandas numpy requests
 
       - name: 执行策略监控脚本
         env:
-          # 读取你在 Secrets 中配置的微信 Token
+          # 读取你在 Secrets 中配置的 Bark 推送 Key
           BARK_KEY: ${{ secrets.BARK_KEY }}
         run: python fx_monitor.py
