@@ -6,10 +6,10 @@ import pandas as pd
 import yfinance as yf
 
 # ================= 配置区域 =================
-# 纯正的日元交叉盘监控矩阵：统一精度，极简高效
+# 纯正的日元交叉盘监控矩阵
 PAIRS = {
-    "USD/JPY": "USDJPY=X",  # 美日：宏观风向标，趋势极强
-    "EUR/JPY": "EURJPY=X",  # 欧日：交叉盘趋势之王，极其丝滑
+    "USD/JPY": "USDJPY=X",  
+    "EUR/JPY": "EURJPY=X",  
 }
 
 TRANSLATE_DICT = {
@@ -120,7 +120,7 @@ def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
     atr = tr.rolling(window=period).mean()
     return atr
 
-# ================= 策略主逻辑 (H1 + M15 高频假日版) =================
+# ================= 策略主逻辑 (H1 + M15 高频假日双核版) =================
 def analyze_pair(name: str, symbol: str):
     is_jpy = "JPY" in symbol
     pip_mult = 100 if is_jpy else 10000
@@ -129,7 +129,7 @@ def analyze_pair(name: str, symbol: str):
 
     tkr = yf.Ticker(symbol)
     
-    # 1. 获取 1 小时 (H1) 数据定大趋势
+    # 1. 获取 1 小时 (H1) 数据定大趋势 (使用最新接口防报错)
     h1_data = tkr.history(period="20d", interval="1h")
     if len(h1_data) < 100: return
     
@@ -143,6 +143,7 @@ def analyze_pair(name: str, symbol: str):
     # H1 趋势过滤器
     bullish_regime = (last_h1_hist > 0) and (last_h1_rsi > 50)
     bearish_regime = (last_h1_hist < 0) and (last_h1_rsi < 50)
+    if not (bullish_regime or bearish_regime): return
     
     # 2. 获取 15 分钟 (M15) 数据找精准入场点与 ATR
     m15_data = tkr.history(period="5d", interval="15m")
@@ -163,18 +164,33 @@ def analyze_pair(name: str, symbol: str):
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
-    # 3. 信号触发严格条件 (M15 级别要求更敏捷)
-    # 过去 5 根 M15 (也就是 1 小时 15 分钟内) 的极端洗盘判断
-    long_signal = bullish_regime and golden_cross and (float(m15_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
-    short_signal = bearish_regime and death_cross and (float(m15_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
+    # 3. 信号触发严格条件 (双核入场引擎，适配 15 分钟级别)
+    # === 战法 1：极限洗盘反转 (抓 M15 级别的深幅回调) ===
+    long_strategy_1 = golden_cross and (float(m15_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
+    short_strategy_1 = death_cross and (float(m15_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
+
+    # === 战法 2：MACD 零轴拒绝 (抓 M15 强势单边行情中的浅幅回调) ===
+    long_strategy_2 = golden_cross and (float(m15_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
+    short_strategy_2 = death_cross and (float(m15_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
+
+    # 综合判定
+    long_signal = bullish_regime and (long_strategy_1 or long_strategy_2)
+    short_signal = bearish_regime and (short_strategy_1 or short_strategy_2)
+
+    trigger_type = ""
+    if long_signal:
+        trigger_type = "极限洗盘" if long_strategy_1 else "零轴拒绝(均线遇阻)"
+    elif short_signal:
+        trigger_type = "极限洗盘" if short_strategy_1 else "零轴拒绝(均线遇阻)"
 
     # === [新增] 系统状态心跳诊断日志 ===
     print(f"📊 【{name} 游击版 (H1+M15) 状态诊断】")
     print(f"H1 大趋势 -> RSI: {last_h1_rsi:.1f} | MACD柱: {last_h1_hist:.4f} | 看多: {bullish_regime} | 看空: {bearish_regime}")
-    print(f"M15 信号区 -> RSI: {c_rsi:.1f} (近5根极值: {float(m15_rsi.iloc[-5:].min()):.1f} - {float(m15_rsi.iloc[-5:].max()):.1f}) | 金叉: {golden_cross} | 死叉: {death_cross}\n")
+    print(f"M15 信号区 -> RSI: {c_rsi:.1f} (近5根极值: {float(m15_rsi.iloc[-5:].min()):.1f} - {float(m15_rsi.iloc[-5:].max()):.1f})")
+    print(f"M15 交叉态 -> 金叉: {golden_cross} | 死叉: {death_cross} | 战法1(深调): {long_strategy_1 or short_strategy_1} | 战法2(浅调): {long_strategy_2 or short_strategy_2}\n")
 
     if long_signal or short_signal:
-        # 4. 风控逻辑：M15 级别的 ATR 通常只有 5~10 pips，双子星依然适用 1.5 倍 ATR
+        # 4. 风控逻辑：M15 级别的 ATR，依然适用 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
         risk_pips = risk_dist * pip_mult
         
@@ -184,14 +200,14 @@ def analyze_pair(name: str, symbol: str):
             tp_a = round(optimize_tp(raw_tp_a, True, symbol), round_dec)
             subject = f"🟢【买入】假日游击 {name}"
             trend_text = "多头共振"
-            h1_text = "超卖且金叉"
+            h1_text = "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
             raw_tp_a = curr_price - (risk_dist * 1.5)
             tp_a = round(optimize_tp(raw_tp_a, False, symbol), round_dec)
             subject = f"🔴【卖出】假日游击 {name}"
             trend_text = "空头共振"
-            h1_text = "超买且死叉"
+            h1_text = "死叉确立"
 
         macro_info = get_macro_events(name)
 
@@ -200,7 +216,7 @@ def analyze_pair(name: str, symbol: str):
         tp_a_str = price_fmt.format(tp_a)
 
         body = (f"【H1】{trend_text}\n"
-                f"【M15】{h1_text}\n\n"
+                f"【M15】模型: {trigger_type} ({h1_text})\n\n"
                 f"🔹 当前入场价：{curr_price_str}\n"
                 f"🔹 15分钟 ATR：{curr_atr * pip_mult:.1f} pips\n\n"
                 f"🎯 操作建议 (游击快打)：\n"
