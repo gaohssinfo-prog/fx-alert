@@ -79,7 +79,6 @@ def get_macro_events(pair_name: str) -> str:
         root = ET.fromstring(res.content)
         
         alerts = []
-        # 获取当前 UTC 精确时间，用于过滤已经过去的历史数据
         now_utc = pd.Timestamp.utcnow()
         
         for event in root.findall('event'):
@@ -92,32 +91,26 @@ def get_macro_events(pair_name: str) -> str:
                 time_str = event.find('time').text
                 
                 try:
-                    # 处理如 "All Day" 等特殊无具体时间的情况
                     if time_str.lower() in ["all day", "tentative"]:
                         event_dt_utc = pd.to_datetime(date_str).tz_localize('UTC')
                         display_time = f"{date_str} {time_str}"
                     else:
-                        # 组合日期与时间并解析为 UTC
                         event_dt_utc = pd.to_datetime(f"{date_str} {time_str}").tz_localize('UTC')
-                        # 转换为日本时间 JST (Asia/Tokyo)
                         event_dt_jst = event_dt_utc.tz_convert('Asia/Tokyo')
-                        # 格式化输出，例如：09-17 03:00
                         display_time = event_dt_jst.strftime('%m-%d %H:%M')
                 except Exception:
-                    # 遇到无法解析的异常格式时提供容错兜底
                     event_dt_utc = pd.to_datetime(date_str).tz_localize('UTC')
                     display_time = f"{date_str} {time_str}"
                 
                 # 过滤条件：仅保留未来将要发布，以及过去 2 小时内刚刚发布的重大数据
                 if event_dt_utc >= now_utc - pd.Timedelta(hours=2):
                     title_eng = event.find('title').text
-                    title_cn = translate_event(title_eng) # 调用字典翻译
+                    title_cn = translate_event(title_eng)
                     alerts.append(f"⚠️ [{country}] {display_time} | {title_cn}")
         
         if not alerts:
             return "✅ 近期无重大(High)经济数据公布"
         
-        # 为了防止弹窗内容过长，最多只显示最临近的 3 条核心数据
         return "\n".join(alerts[:3])
         
     except Exception as e:
@@ -128,29 +121,17 @@ def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
     整数关卡避让算法：在遇到 .00 或 .50 这种强心理阻力位时提前抢跑
     """
     is_jpy = "JPY" in symbol
-    
-    # 设定关键心理关口的步长 (日元每 0.50 圆一个关口，欧美每 0.0050 一个关口)
     round_base = 0.5 if is_jpy else 0.005 
-    
-    # 设定引力区 (距离关口 10 pips 以内，就触发避让)
     zone = 0.10 if is_jpy else 0.0010 
-    
-    # 设定让利/抢跑空间 (在墙的前面提前 5 pips 平仓落袋)
     buffer = 0.05 if is_jpy else 0.0005 
     
-    # 找到距离当前预测 TP 最近的心理整数关口
     nearest_round = round(tp / round_base) * round_base
     
-    # 如果原始 TP 刚好落在了整数关口的引力区内，启动抢跑机制
     if abs(tp - nearest_round) <= zone:
         if is_long:
-            # 做多向上冲，要在碰到天花板前提前卖出
             return nearest_round - buffer
         else:
-            # 做空向下砸，要在砸到地板前提前买平
             return nearest_round + buffer
-            
-    # 如果不在危险区，原样返回原始 TP
     return tp
 
 # ================= 核心指标算法 =================
@@ -165,7 +146,7 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    """计算 MACD 指标 (坚持华尔街国际标准参数: 12, 26, 9)"""
+    """计算 MACD 指标"""
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -174,7 +155,7 @@ def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int 
     return macd_line, signal_line, hist
 
 def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
-    """计算 ATR 真实波动幅度，用于设定动态的止损和追踪步长"""
+    """计算 ATR 真实波动幅度"""
     high = data['High']
     low = data['Low']
     close = data['Close']
@@ -188,20 +169,17 @@ def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
 # ================= 策略主逻辑 =================
 def analyze_pair(name: str, symbol: str):
     """执行单个货币对的策略分析核心引擎"""
-    # 根据是否包含 JPY 决定 pip 乘数 (日元盘 1 pip = 0.01，非日元盘 = 0.0001)
     is_jpy = "JPY" in symbol
     pip_mult = 100 if is_jpy else 10000
-    # 动态精度：保留该自适应代码，方便未来横向扩展
     round_dec = 3 if is_jpy else 5  
     price_fmt = "{:.3f}" if is_jpy else "{:.5f}"
 
-    # 1. 【核心修复】改用 yf.Ticker().history() 绕过 yfinance 新版多层索引报错
+    # 1. 获取数据
     tkr = yf.Ticker(symbol)
     h_data_all = tkr.history(period="30d", interval="1h")
-    
     if len(h_data_all) < 100: return
 
-    # 2. 利用 pandas 重采样合成 4 小时 (H4) K线，判定大趋势
+    # 2. H4 定大趋势 (pandas 重采样)
     h4_data = h_data_all.resample('4h', closed='right', label='right').agg({
         'Open': 'first',
         'High': 'max',
@@ -216,12 +194,11 @@ def analyze_pair(name: str, symbol: str):
     last_h4_rsi = float(h4_rsi.iloc[-1])
     last_h4_hist = float(h4_hist.iloc[-1])
 
-    # H4 趋势过滤器：大方向不明确时绝对不进场，反应比日线更灵敏
     bullish_regime = (last_h4_hist > 0) and (last_h4_rsi > 50)
     bearish_regime = (last_h4_hist < 0) and (last_h4_rsi < 50)
     if not (bullish_regime or bearish_regime): return
 
-    # 3. 使用原生 1 小时 (H1) 数据寻找精准的入场拐点与计算 ATR 波动率
+    # 3. H1 寻找精准入场点与计算 ATR 波动率
     h_close = h_data_all["Close"].squeeze() if isinstance(h_data_all["Close"], pd.DataFrame) else h_data_all["Close"]
     h_rsi = compute_rsi(h_close)
     h_macd, h_sig, _ = compute_macd(h_close)
@@ -237,16 +214,32 @@ def analyze_pair(name: str, symbol: str):
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
-    # 4. 信号触发严格条件 (RSI 极限反转 + MACD 顺势交叉)
-    # 做多：H4多头 + H1金叉 + 过去5小时内RSI曾跌破35洗盘 + 当前RSI收回35以上
-    long_signal = bullish_regime and golden_cross and (float(h_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
-    # 做空：H4空头 + H1死叉 + 过去5小时内RSI曾突破65诱多 + 当前RSI跌破65以下
-    short_signal = bearish_regime and death_cross and (float(h_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
-    # === [新增] 系统状态心跳诊断日志 ===
-    print(f"📊 【{name} 状态诊断】")
+    # 4. 信号触发严格条件 (双核入场引擎)
+    # === 战法 1：极限洗盘反转 (抓深幅回调) ===
+    long_strategy_1 = golden_cross and (float(h_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
+    short_strategy_1 = death_cross and (float(h_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
+
+    # === 战法 2：MACD 零轴拒绝 (抓强势单边行情中的浅幅回调) ===
+    long_strategy_2 = golden_cross and (float(h_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
+    short_strategy_2 = death_cross and (float(h_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
+
+    # 综合判定：只要大趋势允许，且满足任意一种战法，即触发信号
+    long_signal = bullish_regime and (long_strategy_1 or long_strategy_2)
+    short_signal = bearish_regime and (short_strategy_1 or short_strategy_2)
+
+    # 记录是哪种战法触发的，用于 Bark 推送
+    trigger_type = ""
+    if long_signal:
+        trigger_type = "极限洗盘" if long_strategy_1 else "零轴拒绝(均线遇阻)"
+    elif short_signal:
+        trigger_type = "极限洗盘" if short_strategy_1 else "零轴拒绝(均线遇阻)"
+
+    # === [心跳诊断日志] 帮助你在终端查看系统现状 ===
+    print(f"📊 【{name} 日常版 (H4+H1) 状态诊断】")
     print(f"H4大趋势 -> RSI: {last_h4_rsi:.1f} | MACD柱: {last_h4_hist:.4f} | 看多: {bullish_regime} | 看空: {bearish_regime}")
-    print(f"H1信号区 -> RSI: {c_rsi:.1f} (近5小时极值: {float(h_rsi.iloc[-5:].min()):.1f} - {float(h_rsi.iloc[-5:].max()):.1f}) | 金叉: {golden_cross} | 死叉: {death_cross}\n")
-    # ==================================
+    print(f"H1信号区 -> RSI: {c_rsi:.1f} (近5小时极值: {float(h_rsi.iloc[-5:].min()):.1f} - {float(h_rsi.iloc[-5:].max()):.1f})")
+    print(f"H1交叉态 -> 金叉: {golden_cross} | 死叉: {death_cross} | 战法1(深调): {long_strategy_1 or short_strategy_1} | 战法2(浅调): {long_strategy_2 or short_strategy_2}\n")
+
     if long_signal or short_signal:
         # 5. 双子星分仓战法风控逻辑：动态计算 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
@@ -254,36 +247,29 @@ def analyze_pair(name: str, symbol: str):
         
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
-            
-            # 计算原始 TP，并过一遍整数避让算法优化
             raw_tp_a = curr_price + (risk_dist * 1.5)
-            tp_a = round(optimize_tp(raw_tp_a, True, symbol), round_dec) # 订单A锁定1.5R收益，保本锁胜率
+            tp_a = round(optimize_tp(raw_tp_a, True, symbol), round_dec)
             
             subject = f"🟢【买入信号】{name}"
             trend_text = "多头共振"
-            h1_text = "超卖且金叉"
+            h1_text = "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
-            
-            # 计算原始 TP，并过一遍整数避让算法优化
             raw_tp_a = curr_price - (risk_dist * 1.5)
-            tp_a = round(optimize_tp(raw_tp_a, False, symbol), round_dec) # 订单A锁定1.5R收益，保本锁胜率
+            tp_a = round(optimize_tp(raw_tp_a, False, symbol), round_dec)
             
             subject = f"🔴【卖出信号】{name}"
             trend_text = "空头共振"
-            h1_text = "超买且死叉"
+            h1_text = "死叉确立"
 
-        # 触发信号时，实时抓取该货币对的基本面日历，准备推送
         macro_info = get_macro_events(name)
 
-        # 动态格式化数字显示（保证推送界面的小数位数整齐）
         curr_price_str = price_fmt.format(curr_price)
         sl_str = price_fmt.format(sl)
         tp_a_str = price_fmt.format(tp_a)
 
-        # 组合 Bark 推送文本，展示双仓操作建议与宏观风险提示 (注意更新为 H4)
         body = (f"【H4】{trend_text}\n"
-                f"【H1】{h1_text}\n\n"
+                f"【H1】入场模型: {trigger_type} ({h1_text})\n\n"
                 f"🔹 当前入场价：{curr_price_str}\n"
                 f"🔹 当前 ATR：{curr_atr * pip_mult:.1f} pips\n\n"
                 f"🎯 操作建议 (双开分仓)：\n"
