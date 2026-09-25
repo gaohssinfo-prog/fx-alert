@@ -1,0 +1,32 @@
+name: 🚀 假日游击模式 (H1+M15)
+
+on:
+  schedule:
+    # 核心：每 15 分钟执行一次 (周一至周五)
+    # 语法说明：分钟 小时 日 月 星期。1-5 代表周一到周五。
+    - cron: '*/15 * * * 1-5'
+  
+  # 保留手动触发按钮，方便你随时测试
+  workflow_dispatch: 
+
+jobs:
+  run-guerrilla-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas yfinance numpy
+
+      - name: Execute Holiday Guerrilla Script
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+        run: python fx_monitor_holiday.py
