@@ -1,14 +1,18 @@
 name: 🚀 假日游击模式 (H1+M15)
 
 on:
-  schedule:
+  #schedule:
     # 核心：每 15 分钟执行一次 (周一至周五)
     # 语法说明：分钟 小时 日 月 星期。1-5 代表周一到周五。
     # 完美避开整点未收盘陷阱，在每小时的 1, 16, 31, 46 分钟精准执行
-    - cron: '1,16,31,46 * * * 1-5'
+    #- cron: '1,16,31,46 * * * 1-5'
   
-  # 保留手动触发按钮，方便你随时测试
+  # 保留手动触发按钮
   workflow_dispatch: 
+  
+  # 【核心】开启外部 API Webhook 监听
+  repository_dispatch:     
+    types: [trigger-m15]   # 这里的名字必须和上面 Request Body 里填的一模一样
 
 jobs:
   run-guerrilla-monitor:
