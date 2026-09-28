@@ -1,4 +1,4 @@
-name: FX Signal Hourly Check (H4+H1)
+name: 平日子每小时模式 (H4+H1)
 
 on:
   # schedule:
@@ -7,7 +7,7 @@ on:
   
   workflow_dispatch: # 允许手动点击触发测试
   repository_dispatch:     
-  types: [trigger-h1]   # 新建一个事件名，比如 trigger-h1
+    types: [trigger-h1]   # 新建一个事件名，比如 trigger-h1
 
 jobs:
   run-monitor:
