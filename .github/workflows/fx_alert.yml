@@ -1,13 +1,13 @@
 name: FX Signal Hourly Check (H4+H1)
 
 on:
-  schedule:
+  # schedule:
     # 核心优化：避开整点未收盘陷阱，延后 1 分钟在每小时的 01 分执行 (基于 UTC，周一至周五)
-    - cron: '1 * * * 1-5'
+    # - cron: '1 * * * 1-5'
   
   workflow_dispatch: # 允许手动点击触发测试
-  #repository_dispatch:     
-    #types: [trigger-h1]   # 新建一个事件名，比如 trigger-h1
+  repository_dispatch:     
+  types: [trigger-h1]   # 新建一个事件名，比如 trigger-h1
 
 jobs:
   run-monitor:
