@@ -6,13 +6,11 @@ import pandas as pd
 import yfinance as yf
 
 # ================= 配置区域 =================
-# 纯正的日元交叉盘监控矩阵
 PAIRS = {
     "USD/JPY": "USDJPY=X",  
     "EUR/JPY": "EURJPY=X",  
 }
 
-# 常见外汇基本面新闻：英文转中文词典 (确保云端运行极度稳定，无惧 API 限制)
 TRANSLATE_DICT = {
     "FOMC": "美联储(FOMC)", "Statement": "决议声明", "Press Conference": "新闻发布会",
     "Economic Projections": "经济预测", "Federal Funds Rate": "联邦基金利率",
@@ -29,13 +27,11 @@ TRANSLATE_DICT = {
 
 # ================= 辅助函数 =================
 def translate_event(title: str) -> str:
-    """简单的本地字典翻译，保证无服务器环境下的高可用性"""
     for eng, chs in TRANSLATE_DICT.items():
         title = title.replace(eng, chs)
     return title
 
 def send_bark_alert(subject: str, content: str):
-    """发送 Bark 苹果推送通知给 iPhone"""
     bark_key = os.getenv("BARK_KEY")
     if not bark_key:
         print("未配置 BARK_KEY，仅控制台输出：\n", content)
@@ -44,12 +40,10 @@ def send_bark_alert(subject: str, content: str):
     payload = {"title": subject, "body": content, "group": "FX-DayOff", "sound": "telegraph.caf"}
     try:
         response = requests.post(url, json=payload)
-        print("Bark推送结果:", response.text)
     except Exception as e:
         print("Bark推送失败:", e)
 
 def get_macro_events(pair_name: str) -> str:
-    """获取目标货币对近期的红色(High)重大经济指标，并转换为日本时间(JST)"""
     currencies = pair_name.split('/')
     try:
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
@@ -82,10 +76,9 @@ def get_macro_events(pair_name: str) -> str:
         if not alerts: return "✅ 近期无重大(High)经济数据公布"
         return "\n".join(alerts[:3])
     except Exception as e:
-        return f"⚠️ 财经日历拉取异常: {e}"
+        return f"⚠️️ 财经日历拉取异常: {e}"
 
 def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
-    """整数关卡避让算法：在遇到 .00 或 .50 这种强心理阻力位时提前抢跑"""
     is_jpy = "JPY" in symbol
     round_base = 0.5 if is_jpy else 0.005 
     zone = 0.10 if is_jpy else 0.0010 
@@ -97,7 +90,6 @@ def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
 
 # ================= 核心指标算法 =================
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """计算 RSI 相对强弱指标"""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -107,7 +99,6 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    """计算 MACD 指标 (坚持华尔街国际标准参数: 12, 26, 9)"""
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -116,12 +107,11 @@ def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int 
     return macd_line, signal_line, hist
 
 def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
-    """计算 ATR 真实波动幅度"""
     high, low, close = data['High'], data['Low'], data['Close']
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
     return tr.rolling(window=period).mean()
 
-# ================= 策略主逻辑 (H1 + M15 暴力高频三核破局版) =================
+# ================= 策略主逻辑 =================
 def analyze_pair(name: str, symbol: str):
     is_jpy = "JPY" in symbol
     pip_mult = 100 if is_jpy else 10000
@@ -152,8 +142,6 @@ def analyze_pair(name: str, symbol: str):
     now_jst = pd.Timestamp.utcnow().tz_convert('Asia/Tokyo')
     last_idx_time = m15_data.index[-1]
     
-    # 判断 yfinance 返回的最后一根 K 线是否还没走完 (还在跳动)
-    # yfinance 的 index 是 K 线的起始时间，所以 13:00 的 K 线在 13:15 才收盘
     if now_jst < last_idx_time + pd.Timedelta(minutes=15):
         # 丢弃未收盘的 K 线，确保数据绝对定格，没有任何未来函数
         m15_data = m15_data.iloc[:-1]
@@ -164,7 +152,7 @@ def analyze_pair(name: str, symbol: str):
 
     # 鲜度验证：如果这根K线收盘已经超过 6 分钟，说明错过了最佳进场点，直接放弃
     if not (0 <= minutes_since_close <= 6):
-        print(f"⏳ [{name}] 过滤：最新 K 线({eval_idx_time.strftime('%H:%M')})已收盘 {minutes_since_close:.1f} 分钟，不在 [0~6] 分钟黄金判定窗，安静跳过。")
+        print(f"⏳ [{name}] 过滤：最新 K 线({eval_idx_time.strftime('%H:%M')})已收盘 {minutes_since_close:.1f} 分钟，不在黄金判定窗。")
         return
     # ==================================
 
@@ -176,7 +164,10 @@ def analyze_pair(name: str, symbol: str):
     c_rsi, prev_rsi = float(m15_rsi.iloc[-1]), float(m15_rsi.iloc[-2])
     c_macd, prev_macd = float(m15_macd.iloc[-1]), float(m15_macd.iloc[-2])
     c_sig, prev_sig = float(m15_sig.iloc[-1]), float(m15_sig.iloc[-2])
-    c_hist, prev_hist = float(m15_hist.iloc[-1]), float(m15_hist.iloc[-2])
+    
+    # 提取当前、上一根、上上根动能柱 (加入拐点锁防连发)
+    c_hist, prev_hist, prev2_hist = float(m15_hist.iloc[-1]), float(m15_hist.iloc[-2]), float(m15_hist.iloc[-3])
+    
     curr_price = float(m15_close.iloc[-1])
     curr_atr = float(m15_atr.iloc[-1])
 
@@ -193,9 +184,9 @@ def analyze_pair(name: str, symbol: str):
     long_strategy_2 = golden_cross and (float(m15_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
     short_strategy_2 = death_cross and (float(m15_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
 
-    # 战法 3：动量破冰 (抓 M15 单边不回调的暴力突破追单)
-    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (60 <= c_rsi <= 75)
-    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (25 <= c_rsi <= 40)
+    # 战法 3：动量破冰 (抓 M15 单边不回调的暴力突破追单) -> 加速拐点锁
+    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (prev_hist <= prev2_hist) and (60 <= c_rsi <= 75)
+    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (prev_hist >= prev2_hist) and (25 <= c_rsi <= 40)
 
     # 综合判定
     long_signal = bullish_regime and (long_strategy_1 or long_strategy_2 or long_strategy_3)
@@ -216,21 +207,20 @@ def analyze_pair(name: str, symbol: str):
     print(f"H1 大趋势 -> 看多: {bullish_regime} | 看空: {bearish_regime}")
     print(f"M15 信号区 -> K线起点: {eval_idx_time.strftime('%H:%M')} | 刚刚收盘 {minutes_since_close:.1f} 分钟 | RSI: {c_rsi:.1f}")
     print(f"M15 交叉态 -> 金叉: {golden_cross} | 死叉: {death_cross}")
-    print(f"M15 动能柱 -> 前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
+    print(f"M15 动能柱 -> 前前值: {prev2_hist:.4f} | 前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
     print(f"战法触发 -> 深调: {long_strategy_1 or short_strategy_1} | 浅调: {long_strategy_2 or short_strategy_2} | 追单: {long_strategy_3 or short_strategy_3}\n")
 
     if long_signal or short_signal:
-        # 风控逻辑：M15 级别的 ATR，依然适用 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
         
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec)
-            subject, trend_text, h1_text = f"🟢【买入】假日游击 {name}", "多头共振", "动能爆发" if long_strategy_3 else "金叉确立"
+            subject, trend_text, h1_text = f"🟢【买入】假日游击 {name}", "多头共振", "动能爆发(拐点确立)" if long_strategy_3 else "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price - (risk_dist * 1.5), False, symbol), round_dec)
-            subject, trend_text, h1_text = f"🔴【卖出】假日游击 {name}", "空头共振", "动能爆发" if short_strategy_3 else "死叉确立"
+            subject, trend_text, h1_text = f"🔴【卖出】假日游击 {name}", "空头共振", "动能爆发(拐点确立)" if short_strategy_3 else "死叉确立"
 
         body = (f"【H1】{trend_text}\n"
                 f"【M15】模型: {trigger_type} ({h1_text})\n\n"
