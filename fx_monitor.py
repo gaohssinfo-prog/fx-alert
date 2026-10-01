@@ -70,7 +70,7 @@ def get_macro_events(pair_name: str) -> str:
                     display_time = f"{date_str} {time_str}"
                 
                 if event_dt_utc >= now_utc - pd.Timedelta(hours=2):
-                    alerts.append(f"⚠️ [{country}] {display_time} | {translate_event(event.find('title').text)}")
+                    alerts.append(f"⚠️️ [{country}] {display_time} | {translate_event(event.find('title').text)}")
         if not alerts: return "✅ 近期无重大(High)经济数据公布"
         return "\n".join(alerts[:3])
     except Exception as e:
@@ -139,7 +139,10 @@ def analyze_pair(name: str, symbol: str):
     c_rsi, prev_rsi = float(h_rsi.iloc[-1]), float(h_rsi.iloc[-2])
     c_macd, prev_macd = float(h_macd.iloc[-1]), float(h_macd.iloc[-2])
     c_sig, prev_sig = float(h_sig.iloc[-1]), float(h_sig.iloc[-2])
-    c_hist, prev_hist = float(h_hist.iloc[-1]), float(h_hist.iloc[-2])
+    
+    # 提取当前、上一根、上上根动能柱 (加入拐点锁防连发)
+    c_hist, prev_hist, prev2_hist = float(h_hist.iloc[-1]), float(h_hist.iloc[-2]), float(h_hist.iloc[-3])
+    
     curr_price = float(h_close.iloc[-1])
     curr_atr = float(h_atr.iloc[-1])
 
@@ -155,9 +158,9 @@ def analyze_pair(name: str, symbol: str):
     long_strategy_2 = golden_cross and (float(h_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
     short_strategy_2 = death_cross and (float(h_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
 
-    # 战法 3：动量破冰 (追单) -> H1趋势确立，动能柱持续放大，RSI处于强力区(避开极度超买超卖)
-    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (60 <= c_rsi <= 75)
-    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (25 <= c_rsi <= 40)
+    # 战法 3：动量破冰 (追单) -> 增加 (prev_hist <= prev2_hist) 拐点锁，仅在刚开始加速爆发时触发一次！
+    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (prev_hist <= prev2_hist) and (60 <= c_rsi <= 75)
+    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (prev_hist >= prev2_hist) and (25 <= c_rsi <= 40)
 
     long_signal = bullish_regime and (long_strategy_1 or long_strategy_2 or long_strategy_3)
     short_signal = bearish_regime and (short_strategy_1 or short_strategy_2 or short_strategy_3)
@@ -175,7 +178,7 @@ def analyze_pair(name: str, symbol: str):
     print(f"📊 【{name} 日常版状态诊断】")
     print(f"H4 看多: {bullish_regime} | 看空: {bearish_regime}")
     print(f"H1 金叉: {golden_cross} | 死叉: {death_cross} | RSI: {c_rsi:.1f}")
-    print(f"H1 动能柱前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
+    print(f"H1 动能柱 -> 前前值: {prev2_hist:.4f} | 前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
     print(f"战法触发 -> 深调: {long_strategy_1 or short_strategy_1} | 浅调: {long_strategy_2 or short_strategy_2} | 追单: {long_strategy_3 or short_strategy_3}\n")
 
     if long_signal or short_signal:
@@ -184,11 +187,11 @@ def analyze_pair(name: str, symbol: str):
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec)
-            subject, trend_text, h1_text = f"🟢【买入】{name}", "多头共振", "动能爆发" if long_strategy_3 else "金叉确立"
+            subject, trend_text, h1_text = f"🟢【买入】{name}", "多头共振", "动能爆发(拐点确立)" if long_strategy_3 else "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price - (risk_dist * 1.5), False, symbol), round_dec)
-            subject, trend_text, h1_text = f"🔴【卖出】{name}", "空头共振", "动能爆发" if short_strategy_3 else "死叉确立"
+            subject, trend_text, h1_text = f"🔴【卖出】{name}", "空头共振", "动能爆发(拐点确立)" if short_strategy_3 else "死叉确立"
 
         body = (f"【H4】{trend_text}\n"
                 f"【H1】模型: {trigger_type} ({h1_text})\n\n"
