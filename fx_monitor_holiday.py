@@ -12,6 +12,7 @@ PAIRS = {
     "EUR/JPY": "EURJPY=X",  
 }
 
+# 常见外汇基本面新闻：英文转中文词典 (确保云端运行极度稳定，无惧 API 限制)
 TRANSLATE_DICT = {
     "FOMC": "美联储(FOMC)", "Statement": "决议声明", "Press Conference": "新闻发布会",
     "Economic Projections": "经济预测", "Federal Funds Rate": "联邦基金利率",
@@ -28,11 +29,13 @@ TRANSLATE_DICT = {
 
 # ================= 辅助函数 =================
 def translate_event(title: str) -> str:
+    """简单的本地字典翻译，保证无服务器环境下的高可用性"""
     for eng, chs in TRANSLATE_DICT.items():
         title = title.replace(eng, chs)
     return title
 
 def send_bark_alert(subject: str, content: str):
+    """发送 Bark 苹果推送通知给 iPhone"""
     bark_key = os.getenv("BARK_KEY")
     if not bark_key:
         print("未配置 BARK_KEY，仅控制台输出：\n", content)
@@ -46,6 +49,7 @@ def send_bark_alert(subject: str, content: str):
         print("Bark推送失败:", e)
 
 def get_macro_events(pair_name: str) -> str:
+    """获取目标货币对近期的红色(High)重大经济指标，并转换为日本时间(JST)"""
     currencies = pair_name.split('/')
     try:
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
@@ -66,16 +70,14 @@ def get_macro_events(pair_name: str) -> str:
                         display_time = f"{date_str} {time_str}"
                     else:
                         event_dt_utc = pd.to_datetime(f"{date_str} {time_str}").tz_localize('UTC')
-                        event_dt_jst = event_dt_utc.tz_convert('Asia/Tokyo')
-                        display_time = event_dt_jst.strftime('%m-%d %H:%M')
+                        display_time = event_dt_utc.tz_convert('Asia/Tokyo').strftime('%m-%d %H:%M')
                 except Exception:
                     event_dt_utc = pd.to_datetime(date_str).tz_localize('UTC')
                     display_time = f"{date_str} {time_str}"
                 
+                # 过滤条件：仅保留未来将要发布，以及过去 2 小时内刚刚发布的重大数据
                 if event_dt_utc >= now_utc - pd.Timedelta(hours=2):
-                    title_eng = event.find('title').text
-                    title_cn = translate_event(title_eng) 
-                    alerts.append(f"⚠️ [{country}] {display_time} | {title_cn}")
+                    alerts.append(f"⚠️ [{country}] {display_time} | {translate_event(event.find('title').text)}")
         
         if not alerts: return "✅ 近期无重大(High)经济数据公布"
         return "\n".join(alerts[:3])
@@ -83,18 +85,19 @@ def get_macro_events(pair_name: str) -> str:
         return f"⚠️ 财经日历拉取异常: {e}"
 
 def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
+    """整数关卡避让算法：在遇到 .00 或 .50 这种强心理阻力位时提前抢跑"""
     is_jpy = "JPY" in symbol
     round_base = 0.5 if is_jpy else 0.005 
     zone = 0.10 if is_jpy else 0.0010 
     buffer = 0.05 if is_jpy else 0.0005 
     nearest_round = round(tp / round_base) * round_base
     if abs(tp - nearest_round) <= zone:
-        if is_long: return nearest_round - buffer 
-        else: return nearest_round + buffer 
+        return nearest_round - buffer if is_long else nearest_round + buffer
     return tp
 
 # ================= 核心指标算法 =================
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """计算 RSI 相对强弱指标"""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -104,6 +107,7 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """计算 MACD 指标 (坚持华尔街国际标准参数: 12, 26, 9)"""
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -112,15 +116,12 @@ def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int 
     return macd_line, signal_line, hist
 
 def compute_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
+    """计算 ATR 真实波动幅度"""
     high, low, close = data['High'], data['Low'], data['Close']
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-    return atr
+    tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
 
-# ================= 策略主逻辑 (H1 + M15 高频假日双核版) =================
+# ================= 策略主逻辑 (H1 + M15 暴力高频三核破局版) =================
 def analyze_pair(name: str, symbol: str):
     is_jpy = "JPY" in symbol
     pip_mult = 100 if is_jpy else 10000
@@ -129,7 +130,7 @@ def analyze_pair(name: str, symbol: str):
 
     tkr = yf.Ticker(symbol)
     
-    # 1. 获取 1 小时 (H1) 数据定大趋势 (使用最新接口防报错)
+    # 1. H1 定大趋势 (此处省略校验未收盘H1，因为大趋势较慢，容错率高)
     h1_data = tkr.history(period="20d", interval="1h")
     if len(h1_data) < 100: return
     
@@ -139,24 +140,43 @@ def analyze_pair(name: str, symbol: str):
     
     last_h1_rsi = float(h1_rsi.iloc[-1])
     last_h1_hist = float(h1_hist.iloc[-1])
-
-    # H1 趋势过滤器
     bullish_regime = (last_h1_hist > 0) and (last_h1_rsi > 50)
     bearish_regime = (last_h1_hist < 0) and (last_h1_rsi < 50)
     if not (bullish_regime or bearish_regime): return
     
-    # 2. 获取 15 分钟 (M15) 数据找精准入场点与 ATR
+    # 2. 获取 M15 数据
     m15_data = tkr.history(period="5d", interval="15m")
     if len(m15_data) < 100: return
 
+    # === 【核心破解逻辑：K线鲜度时间锁】 ===
+    now_jst = pd.Timestamp.utcnow().tz_convert('Asia/Tokyo')
+    last_idx_time = m15_data.index[-1]
+    
+    # 判断 yfinance 返回的最后一根 K 线是否还没走完 (还在跳动)
+    # yfinance 的 index 是 K 线的起始时间，所以 13:00 的 K 线在 13:15 才收盘
+    if now_jst < last_idx_time + pd.Timedelta(minutes=15):
+        # 丢弃未收盘的 K 线，确保数据绝对定格，没有任何未来函数
+        m15_data = m15_data.iloc[:-1]
+        
+    eval_idx_time = m15_data.index[-1]
+    candle_close_time = eval_idx_time + pd.Timedelta(minutes=15)
+    minutes_since_close = (now_jst - candle_close_time).total_seconds() / 60.0
+
+    # 鲜度验证：如果这根K线收盘已经超过 6 分钟，说明错过了最佳进场点，直接放弃
+    if not (0 <= minutes_since_close <= 6):
+        print(f"⏳ [{name}] 过滤：最新 K 线({eval_idx_time.strftime('%H:%M')})已收盘 {minutes_since_close:.1f} 分钟，不在 [0~6] 分钟黄金判定窗，安静跳过。")
+        return
+    # ==================================
+
     m15_close = m15_data["Close"].squeeze() if isinstance(m15_data["Close"], pd.DataFrame) else m15_data["Close"]
     m15_rsi = compute_rsi(m15_close)
-    m15_macd, m15_sig, _ = compute_macd(m15_close)
+    m15_macd, m15_sig, m15_hist = compute_macd(m15_close)
     m15_atr = compute_atr(m15_data)
 
     c_rsi, prev_rsi = float(m15_rsi.iloc[-1]), float(m15_rsi.iloc[-2])
     c_macd, prev_macd = float(m15_macd.iloc[-1]), float(m15_macd.iloc[-2])
     c_sig, prev_sig = float(m15_sig.iloc[-1]), float(m15_sig.iloc[-2])
+    c_hist, prev_hist = float(m15_hist.iloc[-1]), float(m15_hist.iloc[-2])
     curr_price = float(m15_close.iloc[-1])
     curr_atr = float(m15_atr.iloc[-1])
 
@@ -164,66 +184,63 @@ def analyze_pair(name: str, symbol: str):
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
-    # 3. 信号触发严格条件 (双核入场引擎，适配 15 分钟级别)
-    # === 战法 1：极限洗盘反转 (抓 M15 级别的深幅回调) ===
+    # === 三核入场引擎 (适配 15 分钟游击战) ===
+    # 战法 1：极限洗盘反转 (抓 M15 级别的深幅回调)
     long_strategy_1 = golden_cross and (float(m15_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
     short_strategy_1 = death_cross and (float(m15_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
-
-    # === 战法 2：MACD 零轴拒绝 (抓 M15 强势单边行情中的浅幅回调) ===
+    
+    # 战法 2：MACD 零轴拒绝 (抓 M15 强势单边行情中的浅幅回调)
     long_strategy_2 = golden_cross and (float(m15_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
     short_strategy_2 = death_cross and (float(m15_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
 
+    # 战法 3：动量破冰 (抓 M15 单边不回调的暴力突破追单)
+    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (60 <= c_rsi <= 75)
+    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (25 <= c_rsi <= 40)
+
     # 综合判定
-    long_signal = bullish_regime and (long_strategy_1 or long_strategy_2)
-    short_signal = bearish_regime and (short_strategy_1 or short_strategy_2)
+    long_signal = bullish_regime and (long_strategy_1 or long_strategy_2 or long_strategy_3)
+    short_signal = bearish_regime and (short_strategy_1 or short_strategy_2 or short_strategy_3)
 
     trigger_type = ""
     if long_signal:
-        trigger_type = "极限洗盘" if long_strategy_1 else "零轴拒绝(均线遇阻)"
+        if long_strategy_1: trigger_type = "极限洗盘"
+        elif long_strategy_2: trigger_type = "零轴拒绝"
+        elif long_strategy_3: trigger_type = "动量追单"
     elif short_signal:
-        trigger_type = "极限洗盘" if short_strategy_1 else "零轴拒绝(均线遇阻)"
+        if short_strategy_1: trigger_type = "极限洗盘"
+        elif short_strategy_2: trigger_type = "零轴拒绝"
+        elif short_strategy_3: trigger_type = "动量追单"
 
-    # === [新增] 系统状态心跳诊断日志 ===
-    print(f"📊 【{name} 游击版 (H1+M15) 状态诊断】")
-    print(f"H1 大趋势 -> RSI: {last_h1_rsi:.1f} | MACD柱: {last_h1_hist:.4f} | 看多: {bullish_regime} | 看空: {bearish_regime}")
-    print(f"M15 信号区 -> RSI: {c_rsi:.1f} (近5根极值: {float(m15_rsi.iloc[-5:].min()):.1f} - {float(m15_rsi.iloc[-5:].max()):.1f})")
-    print(f"M15 交叉态 -> 金叉: {golden_cross} | 死叉: {death_cross} | 战法1(深调): {long_strategy_1 or short_strategy_1} | 战法2(浅调): {long_strategy_2 or short_strategy_2}\n")
+    # === 系统状态心跳诊断日志 ===
+    print(f"📊 【{name} 游击版状态诊断】")
+    print(f"H1 大趋势 -> 看多: {bullish_regime} | 看空: {bearish_regime}")
+    print(f"M15 信号区 -> K线起点: {eval_idx_time.strftime('%H:%M')} | 刚刚收盘 {minutes_since_close:.1f} 分钟 | RSI: {c_rsi:.1f}")
+    print(f"M15 交叉态 -> 金叉: {golden_cross} | 死叉: {death_cross}")
+    print(f"M15 动能柱 -> 前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
+    print(f"战法触发 -> 深调: {long_strategy_1 or short_strategy_1} | 浅调: {long_strategy_2 or short_strategy_2} | 追单: {long_strategy_3 or short_strategy_3}\n")
 
     if long_signal or short_signal:
-        # 4. 风控逻辑：M15 级别的 ATR，依然适用 1.5 倍 ATR 止损
+        # 风控逻辑：M15 级别的 ATR，依然适用 1.5 倍 ATR 止损
         risk_dist = curr_atr * 1.5
-        risk_pips = risk_dist * pip_mult
         
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
-            raw_tp_a = curr_price + (risk_dist * 1.5)
-            tp_a = round(optimize_tp(raw_tp_a, True, symbol), round_dec)
-            subject = f"🟢【买入】假日游击 {name}"
-            trend_text = "多头共振"
-            h1_text = "金叉确立"
+            tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec)
+            subject, trend_text, h1_text = f"🟢【买入】假日游击 {name}", "多头共振", "动能爆发" if long_strategy_3 else "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
-            raw_tp_a = curr_price - (risk_dist * 1.5)
-            tp_a = round(optimize_tp(raw_tp_a, False, symbol), round_dec)
-            subject = f"🔴【卖出】假日游击 {name}"
-            trend_text = "空头共振"
-            h1_text = "死叉确立"
-
-        macro_info = get_macro_events(name)
-
-        curr_price_str = price_fmt.format(curr_price)
-        sl_str = price_fmt.format(sl)
-        tp_a_str = price_fmt.format(tp_a)
+            tp_a = round(optimize_tp(curr_price - (risk_dist * 1.5), False, symbol), round_dec)
+            subject, trend_text, h1_text = f"🔴【卖出】假日游击 {name}", "空头共振", "动能爆发" if short_strategy_3 else "死叉确立"
 
         body = (f"【H1】{trend_text}\n"
                 f"【M15】模型: {trigger_type} ({h1_text})\n\n"
-                f"🔹 当前入场价：{curr_price_str}\n"
+                f"🔹 当前入场价：{price_fmt.format(curr_price)}\n"
                 f"🔹 15分钟 ATR：{curr_atr * pip_mult:.1f} pips\n\n"
                 f"🎯 操作建议 (游击快打)：\n"
-                f"1. 【订单 A】限价止盈：{tp_a_str}\n"
-                f"2. 【订单 B】追踪步长：{risk_pips:.1f} pips\n"
-                f"*(极速硬止损：{sl_str})*\n\n"
-                f"📅 风险提示：\n{macro_info}")
+                f"1. 【订单 A】限价止盈：{price_fmt.format(tp_a)}\n"
+                f"2. 【订单 B】追踪步长：{risk_dist * pip_mult:.1f} pips\n"
+                f"*(极速硬止损：{price_fmt.format(sl)})*\n\n"
+                f"📅 风险提示：\n{get_macro_events(name)}")
         
         send_bark_alert(subject, body)
 
@@ -232,4 +249,4 @@ if __name__ == "__main__":
         try:
             analyze_pair(pair_name, ticker)
         except Exception as e:
-            print(f"分析 {pair_name} 出错: {e}")
+            print(f"分析出错: {e}")
