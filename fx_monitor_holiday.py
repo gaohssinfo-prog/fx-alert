@@ -69,14 +69,13 @@ def get_macro_events(pair_name: str) -> str:
                     event_dt_utc = pd.to_datetime(date_str).tz_localize('UTC')
                     display_time = f"{date_str} {time_str}"
                 
-                # 过滤条件：仅保留未来将要发布，以及过去 2 小时内刚刚发布的重大数据
                 if event_dt_utc >= now_utc - pd.Timedelta(hours=2):
                     alerts.append(f"⚠️ [{country}] {display_time} | {translate_event(event.find('title').text)}")
         
         if not alerts: return "✅ 近期无重大(High)经济数据公布"
         return "\n".join(alerts[:3])
     except Exception as e:
-        return f"⚠️️ 财经日历拉取异常: {e}"
+        return f"⚠️ 财经日历拉取异常: {e}"
 
 def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
     is_jpy = "JPY" in symbol
@@ -120,7 +119,7 @@ def analyze_pair(name: str, symbol: str):
 
     tkr = yf.Ticker(symbol)
     
-    # 1. H1 定大趋势 (此处省略校验未收盘H1，因为大趋势较慢，容错率高)
+    # 1. H1 定大趋势 
     h1_data = tkr.history(period="20d", interval="1h")
     if len(h1_data) < 100: return
     
@@ -143,14 +142,12 @@ def analyze_pair(name: str, symbol: str):
     last_idx_time = m15_data.index[-1]
     
     if now_jst < last_idx_time + pd.Timedelta(minutes=15):
-        # 丢弃未收盘的 K 线，确保数据绝对定格，没有任何未来函数
         m15_data = m15_data.iloc[:-1]
         
     eval_idx_time = m15_data.index[-1]
     candle_close_time = eval_idx_time + pd.Timedelta(minutes=15)
     minutes_since_close = (now_jst - candle_close_time).total_seconds() / 60.0
 
-    # 鲜度验证：如果这根K线收盘已经超过 6 分钟，说明错过了最佳进场点，直接放弃
     if not (0 <= minutes_since_close <= 6):
         print(f"⏳ [{name}] 过滤：最新 K 线({eval_idx_time.strftime('%H:%M')})已收盘 {minutes_since_close:.1f} 分钟，不在黄金判定窗。")
         return
@@ -165,28 +162,26 @@ def analyze_pair(name: str, symbol: str):
     c_macd, prev_macd = float(m15_macd.iloc[-1]), float(m15_macd.iloc[-2])
     c_sig, prev_sig = float(m15_sig.iloc[-1]), float(m15_sig.iloc[-2])
     
-    # 提取当前、上一根、上上根动能柱 (加入拐点锁防连发)
     c_hist, prev_hist, prev2_hist = float(m15_hist.iloc[-1]), float(m15_hist.iloc[-2]), float(m15_hist.iloc[-3])
     
     curr_price = float(m15_close.iloc[-1])
     curr_atr = float(m15_atr.iloc[-1])
 
-    # M15 级别金叉死叉判定
     golden_cross = (prev_macd <= prev_sig) and (c_macd > c_sig)
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
     # === 三核入场引擎 (适配 15 分钟游击战) ===
-    # 战法 1：极限洗盘反转 (抓 M15 级别的深幅回调)
+    # 战法 1：极限洗盘反转 
     long_strategy_1 = golden_cross and (float(m15_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
     short_strategy_1 = death_cross and (float(m15_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
     
-    # 战法 2：MACD 零轴拒绝 (抓 M15 强势单边行情中的浅幅回调)
+    # 战法 2：MACD 零轴拒绝 
     long_strategy_2 = golden_cross and (float(m15_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
     short_strategy_2 = death_cross and (float(m15_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
 
-    # 战法 3：动量破冰 (抓 M15 单边不回调的暴力突破追单) -> 加速拐点锁
-    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (prev_hist <= prev2_hist) and (60 <= c_rsi <= 75)
-    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (prev_hist >= prev2_hist) and (25 <= c_rsi <= 40)
+    # 战法 3：动量破冰 (追单) -> RSI 突入锁，防止连发且不会漏掉顺滑行情
+    long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (prev_rsi < 60) and (60 <= c_rsi <= 75)
+    short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (prev_rsi > 40) and (25 <= c_rsi <= 40)
 
     # 综合判定
     long_signal = bullish_regime and (long_strategy_1 or long_strategy_2 or long_strategy_3)
@@ -202,10 +197,9 @@ def analyze_pair(name: str, symbol: str):
         elif short_strategy_2: trigger_type = "零轴拒绝"
         elif short_strategy_3: trigger_type = "动量追单"
 
-    # === 系统状态心跳诊断日志 ===
     print(f"📊 【{name} 游击版状态诊断】")
     print(f"H1 大趋势 -> 看多: {bullish_regime} | 看空: {bearish_regime}")
-    print(f"M15 信号区 -> K线起点: {eval_idx_time.strftime('%H:%M')} | 刚刚收盘 {minutes_since_close:.1f} 分钟 | RSI: {c_rsi:.1f}")
+    print(f"M15 信号区 -> K线起点: {eval_idx_time.strftime('%H:%M')} | 刚收盘 {minutes_since_close:.1f} 分钟 | 现RSI: {c_rsi:.1f} | 前RSI: {prev_rsi:.1f}")
     print(f"M15 交叉态 -> 金叉: {golden_cross} | 死叉: {death_cross}")
     print(f"M15 动能柱 -> 前前值: {prev2_hist:.4f} | 前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
     print(f"战法触发 -> 深调: {long_strategy_1 or short_strategy_1} | 浅调: {long_strategy_2 or short_strategy_2} | 追单: {long_strategy_3 or short_strategy_3}\n")
@@ -216,11 +210,11 @@ def analyze_pair(name: str, symbol: str):
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec)
-            subject, trend_text, h1_text = f"🟢【买入】假日游击 {name}", "多头共振", "动能爆发(拐点确立)" if long_strategy_3 else "金叉确立"
+            subject, trend_text, h1_text = f"🟢【买入】假日游击 {name}", "多头共振", "动能爆发(RSI突入)" if long_strategy_3 else "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price - (risk_dist * 1.5), False, symbol), round_dec)
-            subject, trend_text, h1_text = f"🔴【卖出】假日游击 {name}", "空头共振", "动能爆发(拐点确立)" if short_strategy_3 else "死叉确立"
+            subject, trend_text, h1_text = f"🔴【卖出】假日游击 {name}", "空头共振", "动能爆发(RSI突入)" if short_strategy_3 else "死叉确立"
 
         body = (f"【H1】{trend_text}\n"
                 f"【M15】模型: {trigger_type} ({h1_text})\n\n"
