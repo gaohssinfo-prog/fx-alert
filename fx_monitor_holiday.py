@@ -137,7 +137,7 @@ def analyze_pair(name: str, symbol: str):
     m15_data = tkr.history(period="5d", interval="15m")
     if len(m15_data) < 100: return
 
-    # === 【核心破解逻辑：K线鲜度时间锁】 ===
+    # === 【K线鲜度时间锁】 ===
     now_jst = pd.Timestamp.utcnow().tz_convert('Asia/Tokyo')
     last_idx_time = m15_data.index[-1]
     
@@ -179,7 +179,7 @@ def analyze_pair(name: str, symbol: str):
     long_strategy_2 = golden_cross and (float(m15_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
     short_strategy_2 = death_cross and (float(m15_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
 
-    # 战法 3：动量破冰 (追单) -> RSI 突入锁，防止连发且不会漏掉顺滑行情
+    # 战法 3：动量破冰 (追单) -> RSI 突入锁
     long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (prev_rsi < 60) and (60 <= c_rsi <= 75)
     short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (prev_rsi > 40) and (25 <= c_rsi <= 40)
 
@@ -205,11 +205,12 @@ def analyze_pair(name: str, symbol: str):
     print(f"战法触发 -> 深调: {long_strategy_1 or short_strategy_1} | 浅调: {long_strategy_2 or short_strategy_2} | 追单: {long_strategy_3 or short_strategy_3}\n")
 
     if long_signal or short_signal:
-        risk_dist = curr_atr * 1.5
+        # 【核心抗震荡优化】: 游击战的 ATR 乘数从 1.5 倍提升至 2.0 倍，给予行情足够的呼吸空间，防止微小回调扫损
+        risk_dist = curr_atr * 2.0
         
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
-            tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec)
+            tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec) # 盈亏比维持 1:1.5 标准
             subject, trend_text, h1_text = f"🟢【买入】假日游击 {name}", "多头共振", "动能爆发(RSI突入)" if long_strategy_3 else "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
