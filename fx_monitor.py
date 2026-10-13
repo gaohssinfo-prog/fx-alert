@@ -71,10 +71,10 @@ def get_macro_events(pair_name: str) -> str:
                 
                 if event_dt_utc >= now_utc - pd.Timedelta(hours=2):
                     alerts.append(f"⚠️ [{country}] {display_time} | {translate_event(event.find('title').text)}")
-        if not alerts: return "✅ 近期无重大(High)经济数据公布"
+        if not alerts: return "✅ 近期无重大经济数据"
         return "\n".join(alerts[:3])
     except Exception as e:
-        return f"⚠️ 财经日历拉取异常: {e}"
+        return f"⚠️ 财经日历异常: {e}"
 
 def optimize_tp(tp: float, is_long: bool, symbol: str) -> float:
     is_jpy = "JPY" in symbol
@@ -128,9 +128,8 @@ def analyze_pair(name: str, symbol: str):
     
     bullish_regime = (float(h4_hist.iloc[-1]) > 0) and (float(h4_rsi.iloc[-1]) > 50)
     bearish_regime = (float(h4_hist.iloc[-1]) < 0) and (float(h4_rsi.iloc[-1]) < 50)
-    if not (bullish_regime or bearish_regime): return
-
-    # H1 信号判定
+    
+    # H1 信号判定 (即使大趋势不明，也要计算 H1 数据用于纯趋势播报)
     h_close = h_data_all["Close"].squeeze() if isinstance(h_data_all["Close"], pd.DataFrame) else h_data_all["Close"]
     h_rsi = compute_rsi(h_close)
     h_macd, h_sig, h_hist = compute_macd(h_close)
@@ -139,7 +138,6 @@ def analyze_pair(name: str, symbol: str):
     c_rsi, prev_rsi = float(h_rsi.iloc[-1]), float(h_rsi.iloc[-2])
     c_macd, prev_macd = float(h_macd.iloc[-1]), float(h_macd.iloc[-2])
     c_sig, prev_sig = float(h_sig.iloc[-1]), float(h_sig.iloc[-2])
-    
     c_hist, prev_hist, prev2_hist = float(h_hist.iloc[-1]), float(h_hist.iloc[-2]), float(h_hist.iloc[-3])
     
     curr_price = float(h_close.iloc[-1])
@@ -149,60 +147,75 @@ def analyze_pair(name: str, symbol: str):
     death_cross = (prev_macd >= prev_sig) and (c_macd < c_sig)
 
     # === 三核入场引擎 ===
-    # 战法 1：极限洗盘反转 (深调)
     long_strategy_1 = golden_cross and (float(h_rsi.iloc[-5:].min()) < 35) and (c_rsi >= 35)
     short_strategy_1 = death_cross and (float(h_rsi.iloc[-5:].max()) > 65) and (c_rsi <= 65)
 
-    # 战法 2：零轴拒绝 (浅调)
     long_strategy_2 = golden_cross and (float(h_rsi.iloc[-5:].max()) > 50) and (c_rsi < 65) and (c_macd < 0)
     short_strategy_2 = death_cross and (float(h_rsi.iloc[-5:].min()) < 50) and (c_rsi > 35) and (c_macd > 0)
 
-    # 战法 3：动量破冰 (追单) -> 升级为 RSI 突入锁，专抓顺滑单边突破且完美防连发轰炸
     long_strategy_3 = (c_macd > 0) and (c_sig > 0) and (c_hist > prev_hist > 0) and (prev_rsi < 60) and (60 <= c_rsi <= 75)
     short_strategy_3 = (c_macd < 0) and (c_sig < 0) and (c_hist < prev_hist < 0) and (prev_rsi > 40) and (25 <= c_rsi <= 40)
 
     long_signal = bullish_regime and (long_strategy_1 or long_strategy_2 or long_strategy_3)
     short_signal = bearish_regime and (short_strategy_1 or short_strategy_2 or short_strategy_3)
 
-    trigger_type = ""
-    if long_signal:
-        if long_strategy_1: trigger_type = "极限洗盘"
-        elif long_strategy_2: trigger_type = "零轴拒绝"
-        elif long_strategy_3: trigger_type = "动量追单"
-    elif short_signal:
-        if short_strategy_1: trigger_type = "极限洗盘"
-        elif short_strategy_2: trigger_type = "零轴拒绝"
-        elif short_strategy_3: trigger_type = "动量追单"
-
     print(f"📊 【{name} 日常版状态诊断】")
     print(f"H4 看多: {bullish_regime} | 看空: {bearish_regime}")
-    print(f"H1 金叉: {golden_cross} | 死叉: {death_cross} | 现RSI: {c_rsi:.1f} | 前RSI: {prev_rsi:.1f}")
-    print(f"H1 动能柱 -> 前前值: {prev2_hist:.4f} | 前值: {prev_hist:.4f} | 当前值: {c_hist:.4f}")
+    print(f"H1 金叉: {golden_cross} | 死叉: {death_cross} | 现RSI: {c_rsi:.1f}")
     print(f"战法触发 -> 深调: {long_strategy_1 or short_strategy_1} | 浅调: {long_strategy_2 or short_strategy_2} | 追单: {long_strategy_3 or short_strategy_3}\n")
 
+    # ================= 核心输出分支 =================
     if long_signal or short_signal:
+        # 【分支 A】触发了开仓交易信号
         risk_dist = curr_atr * 1.5
+        trigger_type = "极限洗盘" if (long_strategy_1 or short_strategy_1) else ("零轴拒绝" if (long_strategy_2 or short_strategy_2) else "动量追单")
         
         if long_signal:
             sl = round(curr_price - risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price + (risk_dist * 1.5), True, symbol), round_dec)
-            subject, trend_text, h1_text = f"🟢【买入】{name}", "多头共振", "动能爆发(RSI突入)" if long_strategy_3 else "金叉确立"
+            subject, trend_text, h1_text = f"🟢【买入】{name}", "多头共振", "动能爆发" if long_strategy_3 else "金叉确立"
         else:
             sl = round(curr_price + risk_dist, round_dec)
             tp_a = round(optimize_tp(curr_price - (risk_dist * 1.5), False, symbol), round_dec)
-            subject, trend_text, h1_text = f"🔴【卖出】{name}", "空头共振", "动能爆发(RSI突入)" if short_strategy_3 else "死叉确立"
+            subject, trend_text, h1_text = f"🔴【卖出】{name}", "空头共振", "动能爆发" if short_strategy_3 else "死叉确立"
 
         body = (f"【H4】{trend_text}\n"
                 f"【H1】模型: {trigger_type} ({h1_text})\n\n"
-                f"🔹 当前入场价：{price_fmt.format(curr_price)}\n"
+                f"🔹 入场价：{price_fmt.format(curr_price)}\n"
                 f"🔹 当前 ATR：{curr_atr * pip_mult:.1f} pips\n\n"
                 f"🎯 操作建议 (双开分仓)：\n"
                 f"1. 【订单 A】限价止盈：{price_fmt.format(tp_a)}\n"
                 f"2. 【订单 B】追踪步长：{risk_dist * pip_mult:.1f} pips\n"
                 f"*(硬止损均设为 {price_fmt.format(sl)})*\n\n"
                 f"📅 风险提示：\n{get_macro_events(name)}")
-        
         send_bark_alert(subject, body)
+        
+    else:
+        # 【分支 B】未触发交易信号，进行【定时趋势雷达播报】
+        now_jst = pd.Timestamp.utcnow().tz_convert('Asia/Tokyo')
+        
+        # 仅在东京时间 08:00, 15:00, 20:00 这三个关键节点发雷达报告
+        if now_jst.hour in [8, 15, 20]:
+            
+            # 分析 H4 宏观状态
+            if bullish_regime: h4_status = "🟢 多头控盘 (逢低做多)"
+            elif bearish_regime: h4_status = "🔴 空头控盘 (逢高做空)"
+            else: h4_status = "⚪ 震荡不明 (耐心观望)"
+            
+            # 分析 H1 微观动能
+            if c_macd > 0 and c_hist > 0: h1_status = "↗️ 动能向上"
+            elif c_macd < 0 and c_hist < 0: h1_status = "↘️ 动能向下"
+            else: h1_status = "↔️ 动能衰退/交织"
+
+            subject = f"📡【趋势雷达】{name}"
+            body = (f"【大级别 H4】{h4_status}\n"
+                    f"【操作级 H1】{h1_status}\n\n"
+                    f"🔹 现价：{price_fmt.format(curr_price)}\n"
+                    f"🔹 H1 RSI：{c_rsi:.1f}\n"
+                    f"🔹 波动率：{curr_atr * pip_mult:.1f} pips\n\n"
+                    f"*(当前无交易信号，仅作盘面巡航播报)*\n\n"
+                    f"📅 风险提示：\n{get_macro_events(name)}")
+            send_bark_alert(subject, body)
 
 if __name__ == "__main__":
     for pair_name, ticker in PAIRS.items():
